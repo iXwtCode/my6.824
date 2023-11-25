@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 import "log"
@@ -46,10 +45,10 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatal("call return false!")
 		}
 		taskInfo := taskReply
-		switch taskInfo.taskType {
+		switch taskInfo.TaskType {
 		case Map:
 			{
-				fmt.Printf("file name: %v, taskNO: %v\n", taskInfo.fileNames, taskInfo.taskNo)
+				//fmt.Printf("file name: %v, taskNO: %v\n", taskInfo.FileNames, taskInfo.TaskNo)
 				doMap(mapf, &taskInfo)
 				call("Coordinator.Finish", &taskInfo, &finishReply)
 			}
@@ -71,7 +70,7 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func doMap(mapf func(string, string) []KeyValue, info *TaskInfo) {
-	filename := info.fileNames
+	filename := info.FileNames[0]
 	file, err := os.Open(filename)
 	defer file.Close()
 	if err != nil {
@@ -82,6 +81,7 @@ func doMap(mapf func(string, string) []KeyValue, info *TaskInfo) {
 		log.Fatalf("cannot read %v", filename)
 	}
 	kva := mapf(filename, string(content))
+	//log.Printf("kva length: %v", len(kva))
 	sort.Sort(ByKey(kva))
 
 	reducerNum := info.ReducerNum
@@ -91,7 +91,7 @@ func doMap(mapf func(string, string) []KeyValue, info *TaskInfo) {
 		hashKV[nthReducer] = append(hashKV[nthReducer], kv)
 	}
 	for i := 0; i < reducerNum; i++ {
-		interFileName := filename + "-" + strconv.Itoa(info.taskNo) + "-" + strconv.Itoa(i)
+		interFileName := filename + "-" + strconv.Itoa(info.TaskNo) + "-" + strconv.Itoa(i)
 		tempFile, _ := os.CreateTemp("", "temp-")
 		defer os.Remove(tempFile.Name())
 
@@ -102,38 +102,36 @@ func doMap(mapf func(string, string) []KeyValue, info *TaskInfo) {
 				log.Fatal("encode err!")
 			}
 		}
-		os.Rename(tempFile.Name(), "../"+interFileName)
+		err := os.Rename(tempFile.Name(), "../"+interFileName)
+		if err != nil {
+			log.Fatal("rename err!")
+		}
 	}
 }
 
 func doReduce(reducef func(string, []string) string, info *TaskInfo) {
-	filenames := info.fileNames
-	nre := info.nReducer
+	filenames := info.FileNames
+	nre := info.NReducer
 	var intermediate []KeyValue
 
-	files, err := os.ReadDir(filenames)
-	if err != nil {
-		log.Fatal("cannot open")
-	}
-	for _, file := range files {
-		fileName := file.Name()
-		if strings.HasSuffix(fileName, strconv.Itoa(nre)) {
-			f, err := os.Open(fileName)
-			if err != nil {
-				log.Fatalf("cannot open %v", fileName)
-			}
-
-			dec := json.NewDecoder(f)
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					break
-				}
-				intermediate = append(intermediate, kv)
-			}
-			f.Close()
+	//log.Printf("taskFiles length: %v", len(taskFiles))
+	for _, file := range filenames {
+		f, err := os.Open(file)
+		if err != nil {
+			log.Fatal("open fail!")
 		}
+
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		f.Close()
 	}
+	//log.Printf("intermediate length: %v", len(intermediate))
 	sort.Sort(ByKey(intermediate))
 	tempFile, err := os.CreateTemp("", "temp-"+strconv.Itoa(nre))
 	if err != nil {
@@ -157,7 +155,7 @@ func doReduce(reducef func(string, []string) string, info *TaskInfo) {
 		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
 		i = j
 	}
-	os.Rename(tempFile.Name(), "mr-out-"+strconv.Itoa(nre))
+	os.Rename(tempFile.Name(), "./mr-out-"+strconv.Itoa(nre))
 }
 
 // example function to show how to make an RPC call to the coordinator.

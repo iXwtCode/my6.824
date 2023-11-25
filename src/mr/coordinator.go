@@ -1,12 +1,13 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,8 +34,8 @@ const (
 type Coordinator struct {
 	// Your definitions here.
 	Mu           sync.Mutex
+	Fmu          sync.Mutex
 	State        CoState
-	Tasks        map[int]TaskInfo
 	Mapchan      chan *TaskInfo
 	Reducechan   chan *TaskInfo
 	TaskFinished map[TaskType]map[int]bool
@@ -52,8 +53,10 @@ func (c *Coordinator) TaskNO() int {
 
 // 检查 map or reduce 是否完成
 func (c *Coordinator) HasFinished(taskType TaskType) bool {
-	c.Mu.Lock()
-	defer c.Mu.Unlock()
+	//c.Mu.Lock()
+	//defer c.Mu.Unlock()
+	c.Fmu.Lock()
+	defer c.Fmu.Unlock()
 	taskMap := c.TaskFinished[taskType]
 	for _, v := range taskMap {
 		if !v {
@@ -65,13 +68,22 @@ func (c *Coordinator) HasFinished(taskType TaskType) bool {
 
 func checkTimeOut(c *Coordinator, info TaskInfo, ch *chan *TaskInfo) {
 	time.Sleep(time.Second * 10)
-	taskType := info.taskType
-	v, _ := c.TaskFinished[taskType][info.taskNo]
+	taskType := info.TaskType
+	v, _ := c.TaskFinished[taskType][info.TaskNo]
 	if !v { // 10s 后未完成
+		//fmt.Printf("time out: %v\n", info.TaskNo)
+		if c.State == MapWait {
+			c.State = Maping
+		}
+		if c.State == ReduceWait {
+			c.State = Reducing
+		}
 		newTask := info
-		newTask.taskNo = c.TaskNO()
-		delete(c.TaskFinished[taskType], info.taskNo)
-		c.TaskFinished[taskType][info.taskNo] = false
+		newTask.TaskNo = c.TaskNO()
+		c.Fmu.Lock()
+		delete(c.TaskFinished[taskType], info.TaskNo)
+		c.TaskFinished[taskType][newTask.TaskNo] = false
+		c.Fmu.Unlock()
 		*ch <- &newTask
 	}
 }
@@ -84,64 +96,97 @@ func (c *Coordinator) Task(args *GetTaskArgs, reply *TaskInfo) error {
 		{
 			if len(c.Mapchan) > 0 {
 				*reply = *<-c.Mapchan
-				fmt.Printf("file name: %v, taskNO: %v\n", reply.fileNames, reply.taskNo)
+				//fmt.Printf("Maping: %v\n", reply.TaskNo)
+				//fmt.Printf("file name: %v, taskNO: %v\n", reply.FileNames, reply.TaskNo)
 				go checkTimeOut(c, *reply, &c.Mapchan)
 			} else {
 				c.State = MapWait
-				reply.taskType = Wait
+				reply.TaskType = Wait
 			}
 		}
 	case MapWait:
 		{
-			reply.taskType = Wait
+			//fmt.Printf("MapWait: %v\n")
+			reply.TaskType = Wait
 			if c.HasFinished(Map) { // map 操作完成
+				hashFiles := make(map[int][]string)
+				files, err := os.ReadDir("../../")
+				if err != nil {
+					log.Fatal("ReadDir fail!")
+				}
+
+				for _, file := range files {
+					fname := file.Name()
+					sp := strings.Split(fname, "-")
+					var taskNo, nr int
+					if len(sp) == 4 {
+						taskNo, _ = strconv.Atoi(sp[2])
+						nr, _ = strconv.Atoi(sp[3])
+					} else {
+						continue
+					}
+					if _, ok := c.TaskFinished[Map][taskNo]; ok && strings.HasSuffix(fname, strconv.Itoa(nr)) {
+						hashFiles[nr] = append(hashFiles[nr], "../../"+fname)
+					}
+				}
+
 				for i := 0; i < c.ReducerNum; i++ {
 					task := TaskInfo{
-						taskType:   Reduce,
-						taskNo:     c.TaskNO(),
-						fileNames:  "../",
+						TaskType:   Reduce,
+						TaskNo:     c.TaskNO(),
+						FileNames:  hashFiles[i],
 						ReducerNum: c.ReducerNum,
-						nReducer:   i,
+						NReducer:   i,
 					}
 					c.Reducechan <- &task
+					c.TaskFinished[Reduce][task.TaskNo] = false
 				}
+				c.State = Reducing
 			}
 		}
 	case Reducing:
 		{
+			//fmt.Printf("Reducing\n")
 			if len(c.Reducechan) > 0 {
 				*reply = *<-c.Reducechan
 				go checkTimeOut(c, *reply, &c.Reducechan)
 			} else {
 				c.State = ReduceWait
-				reply.taskType = Wait
+				reply.TaskType = Wait
 			}
 		}
 	case ReduceWait:
 		{
-			reply.taskType = Wait
+			//fmt.Printf("ReduceWait\n")
+			reply.TaskType = Wait
 			if c.HasFinished(Reduce) {
 				c.State = Finish
+				reply.TaskType = PleaseExit
 			}
 		}
 	case Finish:
 		{
-			reply.taskType = Wait
+			//fmt.Printf("Finish\n")
+			reply.TaskType = PleaseExit
 		}
 	}
 	return nil
 }
 
 func (c *Coordinator) Finish(args *TaskInfo, reply *FinishReply) error {
-	taskType := args.taskType
 
-	_, ok := c.TaskFinished[taskType][args.taskNo]
+	//fmt.Printf("call finish: %v\n", args.TaskNo)
+	c.Fmu.Lock()
+	defer c.Fmu.Unlock()
+	//fmt.Printf("call finish lock: %v\n", args.TaskNo)
+	taskType := args.TaskType
+	_, ok := c.TaskFinished[taskType][args.TaskNo]
 	if ok { // 这个任务没有因为超时被删除
-		c.Mu.Lock()
-		defer c.Mu.Unlock()
-		c.TaskFinished[taskType][args.taskNo] = true
+		c.TaskFinished[taskType][args.TaskNo] = true
 		reply.Deleted = false
+		//fmt.Printf("finish: %v\n", args.TaskNo)
 	} else {
+		//fmt.Printf("deleted: %v\n", args.TaskNo)
 		reply.Deleted = true
 	}
 	return nil
@@ -199,13 +244,14 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	for _, file := range files {
 		task := TaskInfo{
-			taskType:   Map,
-			taskNo:     c.TaskNO(),
-			fileNames:  file,
+			TaskType:   Map,
+			TaskNo:     c.TaskNO(),
+			FileNames:  []string{file},
 			ReducerNum: nReduce,
-			nReducer:   -1,
+			NReducer:   -1,
 		}
 		c.Mapchan <- &task
+		c.TaskFinished[Map][task.TaskNo] = false
 	}
 	c.server()
 	return &c

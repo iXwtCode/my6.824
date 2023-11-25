@@ -29,11 +29,11 @@ type GetTaskRely struct {
 	TaskInfo TaskInfo
 }
 type TaskInfo struct {
-	taskType   TaskType
-	taskNo     int
-	fileNames  string
+	TaskType   TaskType
+	TaskNo     int
+	FileNames  []string
 	ReducerNum int // 总的reducer数量，map操作中用来计算key对应的reducer。
-	nReducer   int // 表明 task 完成那个 reducer 的任务. 在 map 任务中设置为 nil
+	NReducer   int // 表明 task 完成那个 reducer 的任务. 在 map 任务中设置为 nil
 }
 type FinishArgs struct {
 	TaskInfo TaskInfo
